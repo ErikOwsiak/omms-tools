@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+
+# -- python imports --
+import os, sys, configparser as cp
+# -- set syspath --
+sys.path.insert(0, os.getcwd())
+# -- system imports --
+from syscore.datatypes import *
+from syscore.utils import utils
+from syscore.ommsdb import ommsDB
+from syscore.ommsops import ommsOps
+from syscore.backfillcalc import backfillCalc
+from reports.meter_monthly import meterMonthly
+from reports.validate_monthy import validateMonthly
+
+
+# -- [ years: 2020 - 2030 ] --
+YEAR: int = int(sys.argv[1])
+if YEAR not in range(2020, 2030):
+   raise ValueError(f"BadYearInput: {YEAR}")
+
+# -- [ months: 1 - 12 ] --
+MONTH: int = int(sys.argv[2])
+if MONTH not in range(1, 13):
+   raise ValueError(f"BadMonthInput: {MONTH}")
+
+os.system("clear")
+print("\n\t=== [ fixdata program ] ===\n")
+val = input(f"\tfixdata input is correct [ Y:{YEAR} / M:{MONTH} ] (y/n): ")
+if val.upper() != "Y":
+   print("\t<< exiting >>\n")
+   sys.exit(0)
+
+INI_FILE_PATH: str = "../conf/fixdata.ini"
+if not os.path.exists(INI_FILE_PATH):
+   raise FileNotFoundError(INI_FILE_PATH)
+INI: cp.ConfigParser = cp.ConfigParser()
+if len(INI.read(INI_FILE_PATH)) != 1:
+   raise SystemError("BadIniFileLoad")
+
+CONN_TEMPLATE = INI.get("DATABASE", "CONN_STR_TEMPLATE")
+OMMS_DB: ommsDB = ommsDB(CONN_TEMPLATE % ("localhost", 8787))
+if not OMMS_DB.connect():
+   raise SystemError("UnableToConnectToOmmsDB")
+
+ommsops: ommsOps = ommsOps(db=OMMS_DB)
+MET_CIRC_ARR: [] = ommsops.get_electric_met_circ_info()
+assert MET_CIRC_ARR is not None
+RUNID: int = utils.get_run_id()
+NOTE: str = "Sep/2023 Fix"
+
+
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+# -- [] --
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+def on_db_insert(data):
+   print(f"\n\t[ Database Insert: {data} ]")
+   dbid, dts_str, fst_kwhrs, lst_kwhrs = data
+   if fst_kwhrs is None and lst_kwhrs is None:
+      return dbid, -2
+   # -- 1st of the month --
+   dts_str: str = utils.fst_datetime_of_month(YEAR, MONTH)
+   qry = f"insert into streams.kwhs_raw" \
+      f" values (default, {dbid}, '{dts_str}', true, {fst_kwhrs}, 0.0, 0.0, 0.0, '{NOTE} - fst');"
+   print(qry)
+   rval_fst: int = OMMS_DB.insert_1row(qry)
+   # -- last of the month --
+   dts_str: str = utils.lst_datetime_of_month(YEAR, MONTH)
+   qry = f"insert into streams.kwhs_raw" \
+      f" values (default, {dbid}, '{dts_str}', true, {lst_kwhrs}, 0.0, 0.0, 0.0, '{NOTE} - lst');"
+   print(qry)
+   rval_lst: int = OMMS_DB.insert_1row(qry)
+   # print(f"[ db_inst 1st/ {rval_1st} | db_inst lst/ {rval_lst} ]")
+   return dbid, (rval_fst + rval_lst)
+
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+# -- [] --
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+def on_val_result(result):
+   meter_id, cir_tag, fst_read, lst_read = result
+   fill_calc: backfillCalc = backfillCalc(y=YEAR, m=MONTH, met_circ_dbid=meter_id
+      , circ_tag=cir_tag, db=OMMS_DB, fst_read=fst_read, lst_read=lst_read)
+   # -- -- -- -- --
+   fst_kwhrs, lst_kwhrs = fill_calc.try_fill_missing_readings()
+   return meter_id, cir_tag, fst_kwhrs, lst_kwhrs
+
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+# -- [] --
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+def on_meter(meter_info) -> ():
+   print(f"\n\t[ Processing Meter: {meter_info} ]")
+   meter_id, syspath, cir_tag = meter_info
+   validator: validateMonthly = validateMonthly(OMMS_DB, meter_id, cir_tag, YEAR, MONTH)
+   validator.init()
+   fst_read, lst_read = validator.run()
+   return meter_id, cir_tag, fst_read, lst_read
+
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+# -- [] --
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+def validate_try_backfill_readings():
+   print(f"\n\t[ validate_try_backfill_readings ]")
+   # -- -- -- -- -- --
+   VAL_RESULTS: [] = [on_meter(m) for m in MET_CIRC_ARR]
+   # -- -- -- -- -- --
+   FIX_RESULTS: [] = [on_val_result(r) for r in VAL_RESULTS]
+   # -- -- -- -- -- --
+   DB_RESULTS: [] = [on_db_insert(fr) for fr in FIX_RESULTS]
+   print(DB_RESULTS)
+   # -- -- -- -- -- --
+   print("\n\n")
+   BAD_DB: [] = [i for i in DB_RESULTS if i[1] < 0]
+   print([len(BAD_DB), BAD_DB])
+   # -- -- -- -- -- --
+
+
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+# -- -- [ entry point ] -- --
+# = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =
+if __name__ == "__main__":
+   print("\n\t=== [ main ] ===")
+   validate_try_backfill_readings()
+   print("\n\t<< the end >>\n")
