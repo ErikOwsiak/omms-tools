@@ -78,8 +78,9 @@ class ommsOps(object):
 
 # -- test --
 if __name__ == "__main__":
-   db: ommsDB = ommsDB()
-   if db.connect():
-      ops: ommsOps = ommsOps(db)
-      s_kwhrs = 2352.06
-      # ops.fix_meter_reading(1077, 2022, 10, s_kwhrs, (s_kwhrs + 515.3))
+   pass
+   # db: ommsDB = ommsDB()
+   # if db.connect():
+   #    ops: ommsOps = ommsOps(db)
+   #    s_kwhrs = 2352.06
+   #    # ops.fix_meter_reading(1077, 2022, 10, s_kwhrs, (s_kwhrs + 515.3))
